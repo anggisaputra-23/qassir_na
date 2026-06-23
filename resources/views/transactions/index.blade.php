@@ -922,6 +922,11 @@ if (payload.id === null) {
 
     // Confirm payment -> checkout
 confirmPaymentBtn.onclick = function(){
+    // Cegah double click
+    if(confirmPaymentBtn.disabled) {
+        return;
+    }
+
     const method = document.getElementById('paymentMethod').value;
     const totals = calculateTotalsLocal();
     let paid = 0;

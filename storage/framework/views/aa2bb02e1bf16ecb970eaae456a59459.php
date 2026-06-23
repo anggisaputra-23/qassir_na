@@ -42,7 +42,7 @@
 
                 <div class="mb-3 mt-4">
                     <label class="form-label">Uang Fisik di Laci (Rp)</label>
-                    <input type="number" name="actual_cash" class="form-control" required min="0">
+                    <input type="number" name="actual_cash" class="form-control" required min="0" step="1" placeholder="Masukkan angka bulat tanpa desimal">
                 </div>
 
                 <div class="d-flex justify-content-end">

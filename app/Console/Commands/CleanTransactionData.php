@@ -36,6 +36,7 @@ class CleanTransactionData extends Command
             $tables = [
                 'transaction_items',
                 'transactions',
+                'expenses',  // Tabel belanjaan yang disimpan per closing
                 'cash_expenses',
                 'cash_closings',
                 'cash_openings',

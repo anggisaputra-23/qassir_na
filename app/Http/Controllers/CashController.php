@@ -15,19 +15,36 @@ class CashController extends Controller
 {
     public function openingForm()
     {
-        return view('cash.opening');
+        // Ambil closing terakhir untuk pre-fill opening amount
+        $lastClosing = CashClosing::latest('date')->first();
+        $suggestedAmount = $lastClosing ? $lastClosing->actual_cash : 0;
+
+        return view('cash.opening', compact('suggestedAmount', 'lastClosing'));
     }
 
     public function saveOpening(Request $request)
     {
         $request->validate([
-            'opening_amount' => 'required|numeric|min:0',
+            'opening_amount' => 'required|integer|min:0',
         ]);
 
         $activeShift = CashOpening::whereDoesntHave('cashClosing')->latest('date')->first();
         if ($activeShift) {
             return redirect()->route('dashboard.index')
                 ->with('error', 'Masih ada shift aktif. Tutup kasir dulu sebelum membuka shift baru.');
+        }
+
+        // Cek apakah ada closing owner di hari yang sama yang menutup shift 1 (no_next_shift = true)
+        $lastClosingToday = CashClosing::whereDate('date', today())
+            ->whereHas('opening', function($q) {
+                $q->where('owner_closed_same_day', true);
+            })
+            ->latest('date')
+            ->first();
+
+        if ($lastClosingToday) {
+            return redirect()->route('dashboard.index')
+                ->with('error', 'Owner telah menutup shift hari ini. Tidak boleh membuka shift baru pada hari yang sama.');
         }
 
         $todayShifts = CashOpening::whereDate('date', today())->count();
@@ -55,15 +72,19 @@ class CashController extends Controller
                 ->with('error', 'Belum ada shift aktif. Buka kasir terlebih dahulu.');
         }
 
+        // PENTING: Hanya ambil transactions yang dibuat SETELAH shift dibuka
         $transactions = Transaction::where('status', 'paid')
-            ->whereBetween('created_at', [$opening->date, now()])
+            ->where('created_at', '>=', $opening->date)  // >= opening date, bukan between
             ->get();
 
         $totalSales   = $transactions->sum('total');
         $totalCash    = $transactions->where('payment_method', 'cash')->sum('total');
         $totalNonCash = $transactions->where('payment_method', '!=', 'cash')->sum('total');
 
-        $expenses = Expense::whereBetween('date', [$opening->date, now()])->get();
+        // Hanya ambil expenses yang terikat pada shift saat ini
+        $expenses = Expense::where('cash_opening_id', $opening->id)
+            ->where('date', '>=', $opening->date)  // hanya dari shift ini
+            ->get();
         $totalExpenses = $expenses->sum('amount');
 
         $expectedCash = $totalCash - $totalExpenses;
@@ -82,9 +103,9 @@ class CashController extends Controller
     public function saveClosing(Request $request)
     {
         $request->validate([
-            'actual_cash'             => 'required|numeric|min:0',
+            'actual_cash'             => 'required|integer|min:0',
             'expenses.*.expense_name' => 'nullable|string|max:255',
-            'expenses.*.amount'       => 'nullable|numeric|min:0',
+            'expenses.*.amount'       => 'nullable|integer|min:0',
         ]);
 
         try {
@@ -97,8 +118,9 @@ class CashController extends Controller
 
                 $closingTime = now();
 
+                // PENTING: Ambil transactions yang dibuat SETELAH shift dibuka
                 $transactions = Transaction::where('status', 'paid')
-                    ->whereBetween('created_at', [$opening->date, $closingTime])
+                    ->where('created_at', '>=', $opening->date)
                     ->get();
 
                 $totalSales   = $transactions->sum('total');
@@ -109,19 +131,27 @@ class CashController extends Controller
                     foreach ($request->expenses as $exp) {
                         if (!empty($exp['expense_name']) && !empty($exp['amount'])) {
                             Expense::create([
-                                'expense_name' => $exp['expense_name'],
-                                'amount'       => $exp['amount'],
-                                'date'         => $closingTime,
-                                'user_id'      => Auth::id(),
+                                'cash_opening_id' => $opening->id,
+                                'expense_name'    => $exp['expense_name'],
+                                'amount'          => (int)$exp['amount'],
+                                'date'            => $closingTime,
+                                'user_id'         => Auth::id(),
                             ]);
                         }
                     }
                 }
 
-                $totalExpenses = Expense::whereBetween('date', [$opening->date, $closingTime])->sum('amount');
+                // PENTING: Hanya hitung expenses yang terikat pada shift saat ini
+                // Yang benar-benar dibuat/input di sesi closing ini
+                $totalExpenses = Expense::where('cash_opening_id', $opening->id)
+                    ->where('date', '>=', $opening->date) // expenses hanya dari shift ini
+                    ->sum('amount');
                 $expectedCash  = $totalCash - $totalExpenses;
 
-                $difference = $request->actual_cash - $expectedCash;
+                $difference = (int)$request->actual_cash - $expectedCash;
+
+                // Cek apakah yang menutup adalah owner dan membuka shift hari yang sama
+                $isOwnerClosingSameDay = Auth::user()->isOwner() && $opening->shift_number == 1;
 
                 CashClosing::create([
                     'user_id'         => Auth::id(),
@@ -132,11 +162,16 @@ class CashController extends Controller
                     'total_non_cash'  => $totalNonCash,
                     'total_expenses'  => $totalExpenses,
                     'expected_cash'   => $expectedCash,
-                    'actual_cash'     => $request->actual_cash,
+                    'actual_cash'     => (int)$request->actual_cash,
                     'difference'      => $difference,
                     'shift_number'    => $opening->shift_number,
                     'date'            => $closingTime,
                 ]);
+
+                // Set flag jika owner menutup shift 1 hari yang sama
+                if ($isOwnerClosingSameDay) {
+                    $opening->update(['owner_closed_same_day' => true]);
+                }
             });
 
             return redirect()->route('kas.opening.form')
@@ -179,7 +214,7 @@ class CashController extends Controller
             ->whereBetween('created_at', [$closing->opening->date, $closing->date])
             ->get();
 
-        $expenses = Expense::whereBetween('date', [$closing->opening->date, $closing->date])->get();
+        $expenses = Expense::where('cash_opening_id', $closing->cash_opening_id)->get();
 
         return view('cash.show', compact('closing', 'transactions', 'expenses'));
     }
@@ -187,7 +222,7 @@ class CashController extends Controller
     public function print($id)
     {
         $closing  = CashClosing::with('user', 'opening')->findOrFail($id);
-        $expenses = Expense::whereBetween('date', [$closing->opening->date, $closing->date])->get();
+        $expenses = Expense::where('cash_opening_id', $closing->cash_opening_id)->get();
 
         return view('cash.print', compact('closing', 'expenses'));
     }

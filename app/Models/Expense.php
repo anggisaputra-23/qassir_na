@@ -11,6 +11,7 @@ class Expense extends Model
 
     protected $fillable = [
         'user_id',
+        'cash_opening_id',
         'expense_name', // nama belanja/pengeluaran
         'amount',
         'date',
@@ -29,5 +30,13 @@ class Expense extends Model
     public function user()
     {
         return $this->belongsTo(\App\Models\User::class, 'user_id');
+    }
+
+    /**
+     * Relasi ke CashOpening (shift yang mempunyai pengeluaran)
+     */
+    public function cashOpening()
+    {
+        return $this->belongsTo(\App\Models\CashOpening::class, 'cash_opening_id');
     }
 }
